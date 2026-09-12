@@ -1,0 +1,265 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# RiskIntel Public Website — production stack
+#
+# The full surface: nginx + built SPA, FastAPI, PostgreSQL, Redis, and a
+# migration job. This is what runs on a self-hosted box, and it is also the
+# artefact used to verify the images before they are pushed to a platform.
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env up -d --build
+#
+# NETWORK SHAPE
+#   website-internal : no route off the host. Postgres, Redis and the backend
+#                      sit here. The database is never published to a port.
+#   website-edge     : nginx only. The single way in.
+#
+# The backend joins both, so it can reach the database while remaining
+# unreachable from outside except through nginx.
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: riskintel-public
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  website-postgres:
+    image: postgres:17-alpine
+    container_name: riskintel-website-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      # scram-sha-256 rather than the md5 default.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+
+    volumes:
+      - website_postgres_data:/var/lib/postgresql/data
+      - website_postgres_backups:/backups
+
+    # No `ports:` on purpose. The database is reachable only from the internal
+    # network. To inspect it, exec into the container or open an SSH tunnel;
+    # neither requires exposing 5432 to the host, let alone the internet.
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} -q"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+    networks: [website-internal]
+
+    security_opt:
+      - no-new-privileges:true
+
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512M }
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  # Shared rate-limit counters. The application falls back to per-process
+  # counting if this is unreachable, so it degrades rather than failing.
+  website-redis:
+    image: redis:7-alpine
+    container_name: riskintel-website-redis
+    restart: unless-stopped
+
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+    networks: [website-internal]
+
+    security_opt:
+      - no-new-privileges:true
+
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 320M }
+
+  # ── Schema migrations ───────────────────────────────────────────────────────
+  # Prisma owns this schema. Both Prisma migrations are applied to the live
+  # database and `alembic_version` does not exist, so running Alembic here would
+  # introduce a second source of truth — which is precisely what produced the
+  # enum-name mismatch fixed in Phase 6.12.
+  #
+  # Runs to completion before the backend starts, and the backend waits on it.
+  website-migrate:
+    build:
+      context: ../prisma
+      dockerfile: Dockerfile
+    image: riskintel/public-migrate:${IMAGE_TAG:-latest}
+    container_name: riskintel-website-migrate
+    restart: "no"
+
+    environment:
+      # The Prisma schema reads env("DB_URL"), not DATABASE_URL. The two names
+      # are supplied deliberately: DB_URL for the migration tool, DATABASE_URL
+      # for SQLAlchemy, which needs the +asyncpg dialect prefix Prisma rejects.
+      DB_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@website-postgres:5432/${POSTGRES_DB}
+
+    # No volumes and no egress: the schema is baked into the image, so this
+    # container needs nothing but the database. It stays on the internal
+    # network, which has no route off the host.
+
+    depends_on:
+      website-postgres:
+        condition: service_healthy
+
+    networks: [website-internal]
+
+    security_opt:
+      - no-new-privileges:true
+
+
+  # ── FastAPI backend ─────────────────────────────────────────────────────────
+  website-backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: runtime
+
+    image: riskintel/public-backend:${IMAGE_TAG:-latest}
+    container_name: riskintel-website-backend
+    restart: unless-stopped
+
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DEBUG: "false"
+      HOST: 0.0.0.0
+      PORT: "8080"
+
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@website-postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@website-redis:6379/0
+
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
+      JWT_ALGORITHM: HS256
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+      JWT_REFRESH_TOKEN_EXPIRE_DAYS: ${JWT_REFRESH_TOKEN_EXPIRE_DAYS:-7}
+
+      # Same-origin through nginx, so this is the site origin, not an API host.
+      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required}
+      # nginx is the only thing in front of the API, so only it is trusted to
+      # set X-Forwarded-For. Trusting a wider range would let a client spoof its
+      # own address and walk around the rate limiter.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-["172.16.0.0/12"]}
+
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-}
+      EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-RiskIntel}
+
+      RELEASE_FILES_BASE_PATH: /data/releases
+      MAX_REQUEST_SIZE: ${MAX_REQUEST_SIZE:-1048576}
+
+    volumes:
+      # Read-only: the API serves artefacts and has no reason to write them.
+      # Publishing mounts the same volume read-write in a separate one-shot
+      # container, so a flaw in the running API cannot alter what is distributed.
+      - release_files:/data/releases:ro
+
+    # No `ports:`. Reachable only through nginx.
+
+    depends_on:
+      website-postgres:
+        condition: service_healthy
+      website-redis:
+        condition: service_healthy
+      website-migrate:
+        condition: service_completed_successfully
+
+    networks: [website-internal, website-edge]
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health/ready || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 25s
+
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 768M }
+
+  # ── nginx + built SPA ───────────────────────────────────────────────────────
+  website-frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        # Empty base URL: the SPA calls its own origin and nginx proxies /api.
+        VITE_API_BASE_URL: ""
+        VITE_SITE_URL: ${SITE_URL:-http://localhost:8081}
+        VITE_API_TIMEOUT_MS: ${API_TIMEOUT_MS:-15000}
+        VITE_SUPPORT_EMAIL: ${SUPPORT_EMAIL:-support@example.com}
+
+    image: riskintel/public-frontend:${IMAGE_TAG:-latest}
+    container_name: riskintel-website-frontend
+    restart: unless-stopped
+
+    environment:
+      BACKEND_ORIGIN: http://website-backend:8080
+
+    ports:
+      # The only published port. In production a TLS terminator sits in front;
+      # bound to loopback so it is never directly internet-facing by accident.
+      - "127.0.0.1:${WEB_PORT:-8081}:8080"
+
+    depends_on:
+      website-backend:
+        condition: service_healthy
+
+    networks: [website-edge]
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    security_opt:
+      - no-new-privileges:true
+
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 256M }
+
+
+volumes:
+  website_postgres_data:
+  website_postgres_backups:
+  # Release artefacts. A named volume, not a bind mount and not image content:
+  # it survives container replacement, which ephemeral container storage does
+  # not. On a platform this maps to a persistent disk.
+  release_files:
+
+networks:
+  website-internal:
+    driver: bridge
+    internal: true      # no route out of the host
+  website-edge:
+    driver: bridge

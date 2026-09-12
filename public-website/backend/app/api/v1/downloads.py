@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import require_verified
 from app.db.session import get_db
+from app.middleware.rate_limit import _get_client_ip
 from app.models.user import User
 from app.schemas.common import PaginatedResponse
 from app.schemas.download import CreateDownloadRequest, DownloadResponse
@@ -24,10 +25,21 @@ router = APIRouter(prefix="/downloads", tags=["Downloads"])
 
 
 def _get_ip(request: Request) -> Optional[str]:
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else None
+    """
+    The address recorded against a download.
+
+    This deliberately reuses the rate limiter's derivation rather than reading
+    X-Forwarded-For directly. Taking the leftmost entry of that header, as this
+    function used to, records whatever the client put there: anyone can send
+    `X-Forwarded-For: 10.0.0.1` and have it written into the audit trail as the
+    address that downloaded the agent. For a record whose purpose is to answer
+    "who was given this build", an attacker-chosen value is worse than none.
+
+    The shared helper honours the header only when the immediate peer is a
+    configured trusted proxy, and then takes the rightmost address that is not
+    one of ours.
+    """
+    return _get_client_ip(request)
 
 
 @router.post(

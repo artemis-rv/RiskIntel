@@ -100,38 +100,34 @@ services:
         condition: service_healthy
       website-redis:
         condition: service_healthy
+      website-migrate:
+        condition: service_completed_successfully
 
-    networks:
-      - website-internal
-      - website-external
-
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health/live"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 512M
-
-  # ── Alembic Migration Runner (init container pattern) ─────────────────────
+  # ── Schema migrations (Prisma) ─────────────────────────────────────────────
+  # Prisma owns this schema: both its migrations are applied to the live
+  # database and `alembic_version` does not exist. Running Alembic here would
+  # create a second, differently-named set of enum types — exactly the mismatch
+  # that broke every enum-bearing endpoint before Phase 6.12.
+  #
+  # `migrate deploy` applies committed migrations only; it never generates or
+  # resets, which are the two things that must not happen to a real database.
   website-migrate:
     build:
-      context: ../backend
+      context: ../prisma
       dockerfile: Dockerfile
-      target: runtime
-
+    image: riskintel/public-migrate:${IMAGE_TAG:-latest}
     container_name: riskintel-website-migrate
     restart: "no"
 
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-riskintel_user}:${POSTGRES_PASSWORD}@website-postgres:5432/${POSTGRES_DB:-riskintel_public}
+      # The Prisma schema reads env("DB_URL"), not DATABASE_URL. The two names
+      # are supplied deliberately: DB_URL for the migration tool, DATABASE_URL
+      # for SQLAlchemy, which needs the +asyncpg dialect prefix Prisma rejects.
+      DB_URL: postgresql://${POSTGRES_USER:-riskintel_user}:${POSTGRES_PASSWORD}@website-postgres:5432/${POSTGRES_DB:-riskintel_public}
 
-    command: ["python", "-m", "alembic", "upgrade", "head"]
+    # No volumes and no egress: the schema is baked into the image, so this
+    # container needs nothing but the database and can stay on the internal
+    # network, which has no route off the host.
 
     depends_on:
       website-postgres:
@@ -139,6 +135,7 @@ services:
 
     networks:
       - website-internal
+
 
 
 volumes:

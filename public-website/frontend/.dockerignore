@@ -1,0 +1,50 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Build-context exclusions
+#
+# Everything here is either useless in the image or must never enter it. The
+# build context is sent to the daemon and every file in it can end up in a
+# layer, so secrets are excluded even though the Dockerfile does not copy them.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Dependencies — reinstalled from the lockfile inside the build
+node_modules/
+
+# Build output — produced inside the image, never copied in
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Environment files. `.env.development` is committed and harmless, but the
+# image must not inherit ANY local environment: build values arrive as
+# explicit ARGs so it is obvious what was baked in.
+.env
+.env.*
+
+# VCS and CI
+.git
+.gitignore
+.github/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Credentials — belt and braces
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets.json
+
+# Docs and container files not needed to build the bundle
+README.md
+Dockerfile
+.dockerignore

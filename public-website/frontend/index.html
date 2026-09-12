@@ -9,7 +9,25 @@
       name="description"
       content="RiskIntel scans your endpoints, scores the risk it finds, and tells you what to fix first."
     />
+    <meta name="theme-color" content="#3355f5" />
+
+    <!--
+      Social and canonical tags are injected here at build time from
+      VITE_SITE_URL (see the seoAssets plugin in vite.config.ts).
+
+      They cannot be left to the runtime PageMeta component alone: no major link
+      scraper — Slack, Discord, LinkedIn, WhatsApp, Facebook, X — executes
+      JavaScript, so whatever is in this static head is the whole of what they
+      see. PageMeta still refines them per route for browsers.
+    -->
+
+    <!-- SVG first for browsers that support it; the raster fallbacks are for
+         Safari < 16, feed readers and crawlers that do not. -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="alternate icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link

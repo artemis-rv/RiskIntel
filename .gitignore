@@ -151,3 +151,20 @@ test_cis_integration.py
 
 # Release artefacts — binaries are distributed, never committed
 public-website/backend/storage/
+
+# Backups — database dumps and release archives contain real data and real
+# artefacts. They belong in backup storage, never in version control.
+*.dump
+releases-*.tar.gz
+db-*.dump
+
+# Vercel CLI state. `.vercel/project.json` carries the project and org ids that
+# link this checkout to an account; the directory is machine-local linkage, not
+# project configuration. The configuration that IS shared is vercel.json.
+.vercel/
+
+# Load-test output. Measurements of a specific deployment on a specific day,
+# including bearer tokens for the test accounts used to produce them.
+loadtest-results/
+*.loadtest.json
+tokens.txt

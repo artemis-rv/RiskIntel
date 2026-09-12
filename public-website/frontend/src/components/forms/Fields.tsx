@@ -58,7 +58,10 @@ function FieldFrame({
               *
             </span>
           ) : (
-            <span className="ml-1.5 text-xs font-normal text-ink-400">(optional)</span>
+            // ink-500 rather than ink-400: this marker says whether the field
+            // has to be filled in, so it carries information and must meet the
+            // 4.5:1 contrast minimum, not the relaxed bar for decoration.
+            <span className="ml-1.5 text-xs font-normal text-ink-500">(optional)</span>
           )}
         </label>
         {labelAside}
@@ -170,7 +173,7 @@ export function TextAreaField({
         maxChars ? (
           <span
             className={`text-xs tabular-nums ${
-              length > maxChars ? 'font-semibold text-danger-600' : 'text-ink-400'
+              length > maxChars ? 'font-semibold text-danger-600' : 'text-ink-500'
             }`}
           >
             {length.toLocaleString()} / {maxChars.toLocaleString()}

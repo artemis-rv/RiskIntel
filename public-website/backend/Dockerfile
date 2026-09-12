@@ -42,6 +42,9 @@ WORKDIR /app
 
 # Copy application code
 COPY app/ ./app/
+COPY scripts/ ./scripts/
+# Alembic is retained as a mirror of the Prisma schema for environments that
+# provision with it. It is NOT run on deploy: Prisma owns the schema.
 COPY alembic/ ./alembic/
 COPY alembic.ini .
 
@@ -55,13 +58,20 @@ EXPOSE 8080
 
 # Health check (uses /health/live endpoint)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:8080/health/live || exit 1
+    CMD curl -fsS http://127.0.0.1:8080/health/live || exit 1
 
-# Start uvicorn with production settings
-CMD ["uvicorn", "app.main:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8080", \
-     "--workers", "4", \
-     "--no-access-log", \
-     "--proxy-headers", \
-     "--forwarded-allow-ips", "*"]
+# ── Runtime configuration ─────────────────────────────────────────────────────
+# Worker count is a deployment decision, not an image decision: a 512 MB
+# container and an 8-core host want very different numbers, and four Python
+# processes will not fit in the smaller one.
+ENV WEB_CONCURRENCY=2
+
+# `--forwarded-allow-ips` is deliberately NOT "*". Accepting X-Forwarded-For
+# from anyone lets a client dictate the address the rate limiter counts against,
+# which defeats it entirely. Only the reverse proxy in front is trusted, and it
+# is named at deploy time.
+ENV FORWARDED_ALLOW_IPS=127.0.0.1
+
+# Shell form so the variables above expand; `exec` keeps uvicorn as PID 1 so it
+# still receives the signals the orchestrator sends.
+CMD exec uvicorn app.main:app     --host 0.0.0.0     --port 8080     --workers "$WEB_CONCURRENCY"     --no-access-log     --proxy-headers     --forwarded-allow-ips "$FORWARDED_ALLOW_IPS"

@@ -54,62 +54,126 @@ backend/
 
 ---
 
+---
+
 ## Quick Start (Local Development)
 
-### 1. Create virtual environment
+To run the backend smoothly, start required services in this exact order:
+
+### 1. What to Start FIRST: Database & Caching Services
+
+Before launching the Python backend, ensure your data services are running:
+
+1. **PostgreSQL 17 (Required - Port `5432`):**
+   - Start your local PostgreSQL server:
+     ```powershell
+     net start postgresql-x64-17   # On Windows
+     # Or via Docker:
+     docker run -d --name local-postgres -p 5432:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=riskintel_public postgres:17
+     ```
+2. **Redis 7 (Optional - Port `6379`):**
+   - Used for distributed rate limiting and token management.
+   - *If you have Redis/Docker:*
+     ```powershell
+     docker run -d --name local-redis -p 6379:6379 redis:7
+     ```
+   - *If you do NOT want to run Redis locally:* No problem! Simply set `REDIS_URL=memory://` in your `.env` (see step 4 below).
+
+---
+
+### 2. Create and Activate Virtual Environment
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate        # Windows
-source .venv/bin/activate     # Linux/macOS
+python -m venv venv
+venv\Scripts\activate        # Windows PowerShell / CMD
+# source venv/bin/activate   # Linux/macOS
 ```
 
-### 2. Install dependencies
+### 3. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configure environment
+### 4. Configure Environment (`.env`)
 
 ```bash
-copy .env.example .env
-# Edit .env with your local values
+copy .env.example .env       # Windows
+# cp .env.example .env       # Linux/macOS
 ```
 
-Minimum required settings:
-```
-DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/riskintel_public
-JWT_SECRET_KEY=<generate with: openssl rand -hex 64>
+Key configuration options in `.env`:
+```env
+DATABASE_URL=postgresql+asyncpg://postgres:your_password@localhost:5432/riskintel_public
+JWT_SECRET_KEY=dev-secret-key-change-in-production-min-32-chars
+
+# 💡 REDIS & RATE LIMITING CONFIGURATION:
+# Option A (Recommended for local dev): Use in-memory rate limiting (avoids Redis timeout & warning)
+REDIS_URL=memory://
+
+# Option B: Use local Redis server if running on port 6379
+# REDIS_URL=redis://localhost:6379/0
 ```
 
-### 4. Run database migrations
+> [!NOTE]
+> ### 💡 Understanding the `rate_limit_storage_fallback` Warning
+> If you see:
+> ```text
+> [warning ] rate_limit_storage_fallback detail=Redis unreachable; rate limits will be enforced per process. reason=TimeoutError
+> ```
+> **This is a non-fatal warning, NOT a crash.** The application probes Redis on startup; if Redis is unreachable, it automatically and safely degrades to in-memory rate limiting (`memory://`).
+> - **To eliminate this warning completely:** Set `REDIS_URL=memory://` in your `.env` file.
+> - **Or start Redis:** Run `docker run -d -p 6379:6379 redis:7`.
+
+### 5. Run Database Migrations
+
+Apply the SQLAlchemy/Alembic schema migrations to create all PostgreSQL tables:
 
 ```bash
 alembic upgrade head
 ```
 
-### 5. Start the development server
+### 6. Seed Development Data & Test Accounts
+
+Seed development accounts (admin, user, unverified) and publish a placeholder release artifact so you can test downloads immediately:
+
+```bash
+python scripts/seed_dev.py
+```
+
+*Pre-seeded credentials:*
+- **Admin:** `admin@riskintel.io` / `Admin-Riskintel-2026!`
+- **Verified User:** `user@riskintel.io` / `User-Riskintel-2026!`
+
+### 7. Start the Development Server
 
 ```bash
 uvicorn app.main:app --reload --port 8080
 ```
 
-API docs: http://localhost:8080/docs
+- **Interactive API Documentation:** http://localhost:8080/docs
+- **Liveness Probe:** http://localhost:8080/health/live
+- **Readiness Probe:** http://localhost:8080/health/ready
 
 ---
 
 ## Docker Deployment
 
-```bash
-# From public-website/docker/
-cp .env.example .env
-# Edit .env with production values
+To launch PostgreSQL, Redis, database migrations, and the FastAPI backend together in Docker:
 
+```bash
+# Navigate to public-website/docker/
+cd public-website/docker
+
+# Copy environment template
+copy .env.example .env       # Windows
+# cp .env.example .env       # Linux/macOS
+
+# Spin up all services
 docker compose up -d
 ```
 
-The `website-migrate` service runs `alembic upgrade head` before the backend starts.
+The `website-migrate` service runs `alembic upgrade head` before the backend container starts.
 
 ---
 

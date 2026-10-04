@@ -18,6 +18,13 @@ import { useEffect } from 'react';
 import { config } from '@/constants/config';
 import { PRODUCT } from '@/constants/content';
 
+/**
+ * The social card. Absolute URLs are required — a relative og:image is ignored
+ * by every scraper — so this is only emitted when a site URL is configured.
+ * The same file is referenced by the static tags in index.html.
+ */
+const SOCIAL_IMAGE_PATH = '/og-image.png';
+
 export interface PageMetaProps {
   /** Page-specific part of the title. The product name is appended. */
   title: string;
@@ -91,7 +98,26 @@ export function PageMeta({
     if (canonical) {
       upsertMeta('meta[property="og:url"]', 'property', 'og:url', canonical);
     }
+    // A card type of summary_large_image promises an image. Declaring it
+    // without one is what makes a shared link render as a blank rectangle, so
+    // the image travels with the declaration rather than being assumed to be
+    // inherited from the static head.
+    if (config.siteUrl) {
+      const image = `${config.siteUrl}${SOCIAL_IMAGE_PATH}`;
+      upsertMeta('meta[property="og:image"]', 'property', 'og:image', image);
+      upsertMeta('meta[name="twitter:image"]', 'name', 'twitter:image', image);
+    }
+
     upsertMeta('meta[name="twitter:card"]', 'name', 'twitter:card', 'summary_large_image');
+    // Twitter falls back to the og:* tags, but only when its own are absent —
+    // being explicit costs two lines and removes the ambiguity.
+    upsertMeta('meta[name="twitter:title"]', 'name', 'twitter:title', fullTitle);
+    upsertMeta(
+      'meta[name="twitter:description"]',
+      'name',
+      'twitter:description',
+      resolvedDescription,
+    );
   }, [title, description, canonicalPath, noIndex, ogType]);
 
   return null;

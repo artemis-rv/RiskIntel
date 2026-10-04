@@ -1,0 +1,174 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# RiskIntel Public Website — Render Blueprint
+#
+# WHAT RUNS WHERE
+#   Vercel  the React SPA. Static build output on a CDN. See
+#           public-website/frontend/vercel.json.
+#   Render  this file: the FastAPI API, PostgreSQL, the rate-limit store, and
+#           the persistent disk that release artefacts live on.
+#
+# WHY THE API IS HERE AND NOT ON VERCEL
+# The deciding requirement is persistent storage for release artefacts. The
+# artefact must survive container replacement and must never be a static asset,
+# so the platform has to offer a real disk attached to a long-lived service.
+# Vercel functions get an ephemeral /tmp and nothing else, which would force
+# object storage immediately. Render offers Docker services, managed Postgres
+# with daily backups and PITR, and persistent disks.
+#
+# WHAT THE SPLIT COSTS
+# The SPA and the API are now different origins, so CORS is load-bearing rather
+# than absent. `CORS_ORIGINS` below must name the Vercel production origin
+# exactly; nothing else may be added to it. Preview deployments are deliberately
+# not allowed — a per-commit origin on a shared domain is not a boundary worth
+# handing credentials across.
+#
+# MIGRATION PATH (deliberately left open, not built)
+# The only thing tying this to a disk is RELEASE_FILES_BASE_PATH, read in
+# exactly one module: app/services/storage.py. Moving to S3/R2 later means
+# reimplementing that module's two functions behind the same signatures. No
+# route, schema or frontend file changes. That boundary is the whole point.
+#
+# APPLY:  Render dashboard → Blueprints → New → point at this repository.
+#         Values marked `sync: false` are entered once in the dashboard and are
+#         never stored in git.
+# ══════════════════════════════════════════════════════════════════════════════
+
+databases:
+  - name: riskintel-db
+    databaseName: riskintel_public
+    user: riskintel_user
+    plan: basic-256mb
+    postgresMajorVersion: "17"
+    # Reachable only from services in the same Render region and project.
+    # No public ingress: the database is never addressable from the internet.
+    ipAllowList: []
+
+services:
+  # ── API + release storage ───────────────────────────────────────────────────
+  - type: web
+    name: riskintel-api
+    runtime: docker
+    plan: starter                     # a disk cannot attach to the free plan
+    region: oregon
+    rootDir: public-website/backend
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health/ready    # readiness, so a broken DB fails the deploy
+
+    # ── Migrations are NOT run automatically here, deliberately ─────────────
+    # There is no preDeployCommand for schema changes, for two reasons.
+    #
+    # First, practically: this service is built from the Python Dockerfile and
+    # contains no `prisma` binary. A preDeployCommand calling it would fail
+    # every deploy. Adding Node to the API image to fix that would grow the
+    # runtime image and its attack surface to serve a build-time need.
+    #
+    # Second, on principle: applying a schema change to a database holding real
+    # accounts should be a decision someone makes, not a side effect of pushing
+    # code. An automatic migration on every deploy means a rollback of the code
+    # does not roll back the schema.
+    #
+    # Apply migrations with the dedicated, pinned image before promoting a
+    # release that needs them. See DEPLOYMENT.md for the full procedure,
+    # including taking a backup first.
+
+    disk:
+      name: release-storage
+      mountPath: /data/releases
+      sizeGB: 10
+
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DEBUG
+        value: "false"
+
+      # Wired from the managed database. The connection string never appears in
+      # this file, in the image, or in git.
+      # Render supplies a plain `postgresql://` string; SQLAlchemy needs the
+      # `+asyncpg` dialect and rejects libpq's `sslmode`. Both translations
+      # happen in app/core/config.py, so the value is used exactly as given.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: riskintel-db
+          property: connectionString
+
+      # Prisma: the same string, under the name the schema actually declares.
+      - key: DB_URL
+        fromDatabase:
+          name: riskintel-db
+          property: connectionString
+
+      # Generated once by Render and never shown in the repository. Rotating it
+      # invalidates every existing session, which is the intended behaviour.
+      - key: JWT_SECRET_KEY
+        generateValue: true
+
+      - key: JWT_ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "15"
+      - key: JWT_REFRESH_TOKEN_EXPIRE_DAYS
+        value: "7"
+
+      # The Vercel production origin, and only that. Must match it exactly —
+      # scheme, host, no trailing slash — or the browser blocks every request.
+      # JSON ARRAY, e.g. ["https://riskintel.vercel.app"]. The setting is typed
+      # List[str] and is JSON-decoded straight from the environment, so a bare
+      # URL fails at startup rather than being silently split.
+      - key: CORS_ORIGINS
+        sync: false
+
+      # Render terminates TLS at its edge and forwards X-Forwarded-For. Only
+      # that proxy range is trusted; a wider value would let a client dictate
+      # the address the rate limiter counts against.
+      - key: TRUSTED_PROXIES
+        value: '["10.0.0.0/8"]'
+
+      - key: RELEASE_FILES_BASE_PATH
+        value: /data/releases
+
+      # Two workers fits the starter plan's memory. Raise with the plan, not
+      # ahead of it. Note that more than one worker is only correct because the
+      # refresh-token store and the rate-limit counters are both in Redis below;
+      # without it each worker keeps its own copy and refreshes fail at random.
+      - key: WEB_CONCURRENCY
+        value: "2"
+
+      # uvicorn rewrites the client address from X-Forwarded-For only for peers
+      # in this range. It must NOT be "*": with `*` uvicorn trusts the whole
+      # chain and takes the LEFTMOST entry, which is whatever the client sent,
+      # so anyone could choose the address the rate limiter counts against.
+      # A CIDR makes it walk the chain right-to-left instead and stop at the
+      # first address that is not one of Render's.
+      - key: FORWARDED_ALLOW_IPS
+        value: "10.0.0.0/8"
+
+      # Shared state across workers and instances: rate-limit counters and the
+      # issued-refresh-token set. The application degrades to per-process
+      # counting if this is unreachable, and says so in the log.
+      - key: REDIS_URL
+        fromService:
+          name: riskintel-redis
+          type: keyvalue
+          property: connectionString
+
+      # SMTP. Entered in the dashboard; a password must never be in a blueprint.
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: EMAIL_FROM_ADDRESS
+        sync: false
+      - key: EMAIL_FROM_NAME
+        value: RiskIntel
+
+  # ── Rate-limit and refresh-token store ──────────────────────────────────────
+  - type: keyvalue
+    name: riskintel-redis
+    plan: free
+    region: oregon
+    ipAllowList: []                   # private to the project
+    maxmemoryPolicy: allkeys-lru

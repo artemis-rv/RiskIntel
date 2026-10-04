@@ -1,0 +1,133 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Public website server block
+#
+# Rendered at container start by the nginx image's envsubst entrypoint, so
+# ${BACKEND_ORIGIN} is supplied by the environment rather than baked into the
+# image. The same image therefore runs in dev, staging and production.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Rate limits for the two endpoints worth protecting at the edge. These sit in
+# front of the application's own limiter rather than replacing it: this one
+# sheds load before it reaches Python, the application one is the authority.
+limit_req_zone $binary_remote_addr zone=auth_limit:10m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=api_limit:10m  rate=120r/m;
+
+server {
+    listen 8080;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Uploads are small JSON bodies; the backend enforces its own limit too.
+    client_max_body_size 2m;
+
+    # ── Security headers ──────────────────────────────────────────────────────
+    # Included here AND in every location block below. nginx discards inherited
+    # add_header directives in any location that sets one of its own, so a
+    # server-level-only policy is silently dropped on most responses.
+    include /etc/nginx/security-headers.conf;
+
+    # ── Health ────────────────────────────────────────────────────────────────
+    # Answered by nginx itself so a platform health check reports on the web
+    # tier alone and does not fail merely because the API is restarting.
+    location = /healthz {
+        include /etc/nginx/security-headers.conf;
+        access_log off;
+        add_header Content-Type text/plain;
+        return 200 "ok\n";
+    }
+
+    # ── API proxy ─────────────────────────────────────────────────────────────
+    # Serving the API under the site's own origin means the browser makes
+    # same-origin requests: no preflight, no CORS configuration to get wrong,
+    # and no third-party origin that could be added to an allowlist by mistake.
+    location /api/ {
+        limit_req zone=api_limit burst=40 nodelay;
+        limit_req_status 429;
+
+        proxy_pass ${BACKEND_ORIGIN};
+
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection        "";
+
+        # The download endpoint streams a multi-megabyte artefact. Buffering it
+        # would hold the whole file in nginx before a single byte reached the
+        # client, and would write it to a temp file on the way.
+        proxy_buffering off;
+        proxy_request_buffering off;
+
+        # Generous enough for a large artefact on a slow connection.
+        proxy_connect_timeout 10s;
+        proxy_send_timeout    300s;
+        proxy_read_timeout    300s;
+
+        # The API sets its own security headers; nginx must not duplicate or
+        # contradict them on proxied responses.
+        proxy_hide_header X-Powered-By;
+    }
+
+    # Authentication endpoints get a tighter edge limit than the rest of the API.
+    location ~ ^/api/v1/auth/(login|register|request-password-reset|resend-verification) {
+        limit_req zone=auth_limit burst=5 nodelay;
+        limit_req_status 429;
+
+        proxy_pass ${BACKEND_ORIGIN};
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection        "";
+    }
+
+    # ── Static assets ─────────────────────────────────────────────────────────
+    # Content-hashed filenames, so they can be cached indefinitely and are
+    # replaced by a new URL rather than by expiry.
+    location /assets/ {
+        include /etc/nginx/security-headers.conf;
+        expires 1y;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        try_files $uri =404;
+    }
+
+    # ── SPA fallback ──────────────────────────────────────────────────────────
+    # index.html must never be cached, or a browser keeps loading an old bundle
+    # that references asset filenames which no longer exist.
+    location / {
+        include /etc/nginx/security-headers.conf;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        try_files $uri $uri/ /index.html;
+    }
+
+    # ── Denials ───────────────────────────────────────────────────────────────
+    # Nothing in the built output should match these; the rules exist so that a
+    # future build mistake does not become a disclosure.
+    location ~ /\.(?!well-known) {
+        deny all;
+        access_log off;
+        return 404;
+    }
+
+    location ~* \.(env|map|log|bak|sql|sqlite3?|pem|key|crt|p12|pfx)$ {
+        deny all;
+        access_log off;
+        return 404;
+    }
+
+    # Release artefacts are NEVER static files here. They live outside the web
+    # root entirely and are delivered only by the authenticated API endpoint.
+    # This rule makes a misplaced binary unreachable rather than merely unlisted.
+    location ~* \.(exe|msi|dmg|pkg|deb|rpm|apk)$ {
+        deny all;
+        access_log off;
+        return 404;
+    }
+
+    # Error pages are handled by the SPA router.
+    error_page 404 /index.html;
+}

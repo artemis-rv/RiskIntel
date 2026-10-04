@@ -126,10 +126,20 @@ def _resolve_storage_uri() -> str:
         return "memory://"
 
 
+# The probe runs once, at import, and its verdict is reused by anything else
+# that wants Redis — currently the refresh-token store. Probing twice would
+# double the startup cost and could disagree with itself.
+RATE_LIMIT_STORAGE_URI: str = _resolve_storage_uri()
+
+#: True when Redis answered the probe. Shared state that must be consistent
+#: across workers (rate-limit counters, refresh tokens) is only safe to keep
+#: in Redis; without it, each worker keeps its own copy.
+REDIS_AVAILABLE: bool = not RATE_LIMIT_STORAGE_URI.startswith("memory://")
+
 limiter = Limiter(
     key_func=_get_client_ip,
     default_limits=[settings.RATE_LIMIT_DEFAULT],
-    storage_uri=_resolve_storage_uri(),
+    storage_uri=RATE_LIMIT_STORAGE_URI,
     # A limiter fault must never become a request fault. If the backend fails
     # mid-flight the request proceeds rather than returning 500.
     swallow_errors=True,

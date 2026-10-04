@@ -1,0 +1,65 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Operator tasks — one-shot containers, never left running
+#
+# The API mounts the release volume READ-ONLY. Writing to it needs a separate,
+# short-lived container that mounts the same volume read-write, so a flaw in the
+# long-running internet-facing service cannot alter what is distributed to
+# users. Serving and publishing are different privileges and get different
+# containers.
+#
+#   Publish a build:
+#     docker compose -f docker-compose.prod.yml -f docker-compose.admin.yml \
+#       --env-file .env run --rm website-publish \
+#       python scripts/publish_release.py \
+#         --file /artefacts/EndpointAgent.exe \
+#         --version 1.0.0 --title "RiskIntel 1.0.0" \
+#         --publisher admin@example.com --publish --latest
+#
+#   Create development accounts (never against production):
+#     docker compose -f docker-compose.prod.yml -f docker-compose.admin.yml \
+#       --env-file .env run --rm website-publish python scripts/seed_dev.py
+#
+#   Open a psql shell:
+#     docker compose -f docker-compose.prod.yml --env-file .env exec \
+#       website-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+# ══════════════════════════════════════════════════════════════════════════════
+
+services:
+
+  website-publish:
+    image: riskintel/public-backend:${IMAGE_TAG:-latest}
+    container_name: riskintel-website-publish
+    profiles: ["admin"]          # never started by a plain `up`
+    restart: "no"
+
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DEBUG: "false"
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@website-postgres:5432/${POSTGRES_DB}
+      # Not used by these scripts, but Settings validates it at import time.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      RELEASE_FILES_BASE_PATH: /data/releases
+      # The limiter is not involved; point it at nothing so no connection is
+      # attempted and the process starts instantly.
+      REDIS_URL: "memory://"
+
+    volumes:
+      # Read-write, unlike the API. This is the only container that may modify
+      # what gets distributed.
+      - release_files:/data/releases:rw
+      # The build to publish, mounted read-only from the host. ARTEFACT_DIR
+      # points at wherever the signed binary actually is; it is never copied
+      # into an image or committed to the repository.
+      - ${ARTEFACT_DIR:-../../agent/dist}:/artefacts:ro
+
+    working_dir: /app
+
+    depends_on:
+      website-postgres:
+        condition: service_healthy
+
+    networks: [website-internal]
+
+    security_opt:
+      - no-new-privileges:true

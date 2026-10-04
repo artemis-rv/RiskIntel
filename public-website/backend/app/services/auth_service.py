@@ -39,15 +39,18 @@ from app.schemas.auth import (
     ResetPasswordRequest,
     TokenResponse,
 )
+from app.services.token_store import refresh_token_store
 from app.utils.audit import log_auth_event
 from app.utils.email import send_password_reset_email, send_verification_email
 
 settings = get_settings()
 logger = get_logger(__name__)
 
-# In-memory refresh token store (replace with Redis in production)
-# Maps hashed_jti -> user_id
-_refresh_token_store: dict[str, str] = {}
+# Issued refresh tokens live in `app/services/token_store.py`, which keeps them
+# in Redis when it is reachable and per-process otherwise. They were previously
+# a module-level dict here, which silently signed people out whenever a refresh
+# landed on a different worker than the login did — see that module's header.
+_REFRESH_TTL_SECONDS = settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600
 
 
 class AuthService:
@@ -155,8 +158,10 @@ class AuthService:
         )
         refresh_token, jti = create_refresh_token(subject=str(user.user_id))
 
-        # Store hashed JTI
-        _refresh_token_store[hash_token(jti)] = str(user.user_id)
+        # Store the hash of the jti, never the token itself.
+        await refresh_token_store.issue(
+            hash_token(jti), str(user.user_id), _REFRESH_TTL_SECONDS
+        )
 
         await self._user_repo.update_last_login(user.user_id)
         await self._session.commit()
@@ -188,15 +193,17 @@ class AuthService:
         user_id_str: str = payload.get("sub", "")
 
         hashed_jti = hash_token(jti)
-        stored_user_id = _refresh_token_store.get(hashed_jti)
+
+        # Spend the token and learn its owner in a single step. Doing this as a
+        # read followed by a delete would leave a window in which two concurrent
+        # requests could both present the same token and both be honoured —
+        # exactly the replay that rotation exists to prevent.
+        stored_user_id = await refresh_token_store.consume(hashed_jti)
 
         if not stored_user_id or stored_user_id != user_id_str:
             raise HTTPException(
                 status_code=401, detail="Refresh token has been revoked."
             )
-
-        # Rotate: revoke old token
-        del _refresh_token_store[hashed_jti]
 
         user = await self._user_repo.get_by_id(uuid.UUID(user_id_str))
         if not user or not user.is_active:
@@ -206,7 +213,9 @@ class AuthService:
             subject=str(user.user_id), role=user.role.value
         )
         new_refresh_token, new_jti = create_refresh_token(subject=str(user.user_id))
-        _refresh_token_store[hash_token(new_jti)] = str(user.user_id)
+        await refresh_token_store.issue(
+            hash_token(new_jti), str(user.user_id), _REFRESH_TTL_SECONDS
+        )
 
         return TokenResponse(
             access_token=new_access_token,
@@ -223,8 +232,7 @@ class AuthService:
         try:
             payload = decode_refresh_token(refresh_token)
             jti = payload.get("jti", "")
-            hashed_jti = hash_token(jti)
-            _refresh_token_store.pop(hashed_jti, None)
+            await refresh_token_store.revoke(hash_token(jti))
         except JWTError:
             pass  # Invalid token — treat as already revoked
 

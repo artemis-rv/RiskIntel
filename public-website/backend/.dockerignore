@@ -26,3 +26,13 @@ env/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Release artefacts. These live on a persistent volume mounted at runtime and
+# must NEVER be baked into an image: an image layer is copied to every registry
+# and every node that pulls it, which is the opposite of controlled distribution.
+storage/
+
+# Tests are not needed at runtime.
+# `scripts/` IS kept: publishing a release runs inside the container, because
+# that is the only place with both the storage volume and the database.
+app/tests/

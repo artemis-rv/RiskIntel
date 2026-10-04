@@ -127,10 +127,15 @@ REDIS_URL=memory://
 
 ### 5. Run Database Migrations
 
-Apply the SQLAlchemy/Alembic schema migrations to create all PostgreSQL tables:
+Apply the SQLAlchemy/Alembic schema migrations:
 
 ```bash
+# For a fresh/empty database:
 alembic upgrade head
+
+# ⚠️ If tables already exist (e.g. error: relation "User" already exists):
+# Tell Alembic the schema is already at head without re-running CREATE TABLE:
+alembic stamp head
 ```
 
 ### 6. Seed Development Data & Test Accounts

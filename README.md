@@ -207,8 +207,11 @@ cd "public-website\backend"
 .\venv\Scripts\activate
 # (On macOS/Linux: source venv/bin/activate)
 
-# 2. Run Alembic database migrations to create tables
+# 2. Run database migrations:
+# If database is fresh/empty:
 alembic upgrade head
+# ⚠️ If tables already exist (e.g. relation "User" already exists from Prisma):
+alembic stamp head
 
 # 3. Seed development accounts and download artifact
 python scripts/seed_dev.py
@@ -432,6 +435,13 @@ For production-grade simulations or strict TLS certificate pinning tests, traffi
     ```powershell
     docker run -d --name local-redis -p 6379:6379 redis:7
     ```
+
+### 6. `DuplicateTableError: relation "User" already exists`
+- **Cause:** PostgreSQL already contains the application tables (e.g. from Prisma), but Alembic's `alembic_version` tracking table was not initialized.
+- **Fix:** Tell Alembic that the schema is already at head without trying to re-execute `CREATE TABLE`:
+  ```powershell
+  alembic stamp head
+  ```
 
 ---
 
